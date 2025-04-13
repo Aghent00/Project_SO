@@ -4,6 +4,9 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 
 #ifdef _WIN32
     #include <direct.h>
@@ -17,6 +20,7 @@
 #define MAX_CLUE 256
 #define FILE_PATH_MAX 512
 
+#pragma pack(1)
 typedef struct {
     char username[MAX_USERNAME];
     float latitude;
@@ -24,6 +28,40 @@ typedef struct {
     char clue[MAX_CLUE];
     int value;
 } Treasure;
+#pragma pack()
+
+// Function to log the operation in the logged_hunt file
+void log_operation(const char *hunt_id, const char *operation, const char *details) {
+    char log_filepath[FILE_PATH_MAX];
+    snprintf(log_filepath, FILE_PATH_MAX, "%s/logged_hunt.txt", hunt_id);
+
+    int logfile = open(log_filepath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (logfile < 0) {
+        perror("Error opening log file");
+        return;
+    }
+
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    char timestamp[20];
+    strftime(timestamp, 20, "%Y-%m-%d %H:%M:%S", tm_info);
+
+    dprintf(logfile, "[%s] Operation: %s | Details: %s\n", timestamp, operation, details);
+
+    close(logfile);
+
+    char symlink_path[FILE_PATH_MAX];
+    snprintf(symlink_path, FILE_PATH_MAX, "logged_hunt-%s", hunt_id);
+    
+    if (unlink(symlink_path) != 0 && errno != ENOENT) {
+        perror("Error removing existing symbolic link");
+        return;
+    }
+
+    if (symlink(log_filepath, symlink_path) != 0) {
+        perror("Error creating symbolic link");
+    }
+}
 
 
 // Function to create the hunt directory if it does not exist
@@ -59,20 +97,21 @@ void add_treasure(const char *hunt_id) {
     char filepath[FILE_PATH_MAX];
     snprintf(filepath, FILE_PATH_MAX, "%s/%s.treasure", hunt_id, t.username);
 
-    FILE *file = fopen(filepath, "w");
-    if (!file) {
+    int fd = open(filepath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd == -1) {
         perror("Error opening file for writing");
         exit(EXIT_FAILURE);
     }
 
-    fprintf(file, "Username: %s\n", t.username);
-    fprintf(file, "Latitude: %.6f\n", t.latitude);
-    fprintf(file, "Longitude: %.6f\n", t.longitude);
-    fprintf(file, "Clue: %s\n", t.clue);
-    fprintf(file, "Value: %d\n", t.value);
 
-    fclose(file);
-    printf("Treasure saved successfully to %s\n", filepath);
+    write(fd, &t, sizeof(Treasure));
+    close(fd);
+
+    char details[256];
+    snprintf(details, sizeof(details), "Added treasure with username '%s'", t.username);
+    log_operation(hunt_id, "add", details);
+
+    printf("Treasure saved successfully.\n");
 }
 
 // Function to get the file size and last modification time
@@ -123,26 +162,26 @@ void list_treasures(const char *hunt_id) {
     printf("Total number of treasures: %d\n", treasure_count);
 }
 
-// Function to read and print a treasure's details from the specified file
+// Function to read and print a treasure details from the specified file
 void view_treasure(const char *hunt_id, const char *username) {
     char filepath[FILE_PATH_MAX];
     snprintf(filepath, FILE_PATH_MAX, "%s/%s.treasure", hunt_id, username);
 
-    FILE *file = fopen(filepath, "r");
-    if (!file) {
-        perror("Error opening file");
+    int fd = open(filepath, O_RDONLY);
+    if (fd < 0) {
+        perror("Error opening file for reading");
         return;
     }
 
     Treasure t;
-    fscanf(file, "Username: %s\n", t.username);
-    fscanf(file, "Latitude: %f\n", &t.latitude);
-    fscanf(file, "Longitude: %f\n", &t.longitude);
-    fgets(t.clue, MAX_CLUE, file);
-    t.clue[strcspn(t.clue, "\n")] = 0;  
-    fscanf(file, "Value: %d\n", &t.value);
+    ssize_t bytes_read = read(fd, &t, sizeof(Treasure));
+    if (bytes_read != sizeof(Treasure)) {
+        perror("Error reading treasure data or file corrupted");
+        close(fd);
+        return;
+    }
 
-    fclose(file);
+    close(fd);
 
     printf("Treasure Details:\n");
     printf("Username: %s\n", t.username);
@@ -152,9 +191,123 @@ void view_treasure(const char *hunt_id, const char *username) {
     printf("Value: %d\n", t.value);
 }
 
+// Function to remove a treasure from a hunt
+void remove_treasure(const char *hunt_id, const char *username) {
+    char filepath[FILE_PATH_MAX];
+    snprintf(filepath, FILE_PATH_MAX, "%s/%s.treasures", hunt_id, username);
+
+    int fd = open(filepath, O_RDONLY);
+    if (fd == -1) {
+        perror("Error opening file for reading");
+        return;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) == -1) {
+        perror("Error getting file size");
+        close(fd);
+        return;
+    }
+    size_t file_size = st.st_size;
+
+    Treasure *treasures = malloc(file_size);
+    if (treasures == NULL) {
+        perror("Error allocating memory");
+        close(fd);
+        return;
+    }
+    ssize_t bytes_read = read(fd, treasures, file_size);
+    if (bytes_read == -1) {
+        perror("Error reading file");
+        free(treasures);
+        close(fd);
+        return;
+    }
+    close(fd);
+
+    size_t treasure_count = bytes_read / sizeof(Treasure);
+    int treasure_index = -1;
+
+    for (size_t i = 0; i < treasure_count; ++i) {
+        if (strcmp(treasures[i].username, username) == 0) {
+            treasure_index = i;
+            break;
+        }
+    }
+
+    if (treasure_index == -1) {
+        printf("Treasure with username '%s' not found.\n", username);
+        free(treasures);
+        return;
+    }
+
+    for (size_t i = treasure_index; i < treasure_count - 1; ++i) {
+        treasures[i] = treasures[i + 1];
+    }
+
+    fd = open(filepath, O_WRONLY | O_TRUNC);
+    if (fd == -1) {
+        perror("Error opening file for writing");
+        free(treasures);
+        return;
+    }
+
+    ssize_t bytes_written = write(fd, treasures, (treasure_count - 1) * sizeof(Treasure));
+    if (bytes_written == -1) {
+        perror("Error writing file after removing treasure");
+    }
+
+    close(fd);
+    free(treasures);
+
+    char details[256];
+    snprintf(details, sizeof(details), "Removed treasure with username '%s'", username);
+    log_operation(hunt_id, "remove_treasure", details);
+
+    printf("Treasure with username '%s' has been removed.\n", username);
+}
+
+// Function to remove an entire hunt with all treasure files
+void remove_hunt(const char *hunt_id) {
+    DIR *dir = opendir(hunt_id);
+    if (dir == NULL) {
+        fprintf(stderr, "Hunt directory '%s' does not exist or cannot be opened.\n", hunt_id);
+        return;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        char filepath[FILE_PATH_MAX];
+        snprintf(filepath, FILE_PATH_MAX, "%s/%s", hunt_id, entry->d_name);
+
+        if (unlink(filepath) == 0) {
+            printf("Removed treasure file: %s\n", filepath);
+        } else {
+            perror("Error removing treasure file");
+        }
+    }
+
+    closedir(dir);
+
+    if (rmdir(hunt_id) == 0) {
+        char details[256];
+        snprintf(details, sizeof(details), "Removed entire hunt '%s'", hunt_id);
+        log_operation(hunt_id, "remove_hunt", details);
+        printf("Hunt '%s' has been completely removed.\n", hunt_id);
+    } else {
+        perror("Error removing hunt directory");
+    }
+}
+
+
+
 int main(int argc, char *argv[]) {
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s add <hunt_id> | list <hunt_id>\n", argv[0]);
+        fprintf(stderr, "Usage: %s add <hunt_id> | list <hunt_id> | view <hunt_id> <id> | remove_treasure <hunt_id> <id> | remove_hunt <hunt_id>\n", argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -164,6 +317,10 @@ int main(int argc, char *argv[]) {
         list_treasures(argv[2]);
     } else if (strcmp(argv[1], "view") == 0 && argc == 4) {
         view_treasure(argv[2], argv[3]);
+    } else if (strcmp(argv[1], "remove_treasure") == 0 && argc == 4) {
+      remove_treasure(argv[2], argv[3]);
+    } else if (strcmp(argv[1], "remove_hunt") == 0 && argc == 3) {
+      remove_hunt(argv[2]);
     } else {
         fprintf(stderr, "Unknown command: %s\n", argv[1]);
         return EXIT_FAILURE;
