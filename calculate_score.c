@@ -5,10 +5,12 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <errno.h>
 
 #define MAX_PATH 512
 #define MAX_USERNAME 100
 #define MAX_CLUE 256
+#define MAX_USERS 100  // Limita de utilizatori
 
 // Structure to store treasure information
 typedef struct {
@@ -20,6 +22,22 @@ typedef struct {
     int value;
 } Treasure;
 
+// Structure to store score for each user
+typedef struct {
+    char username[MAX_USERNAME];
+    int score;
+} UserScore;
+
+// Function to find if a user exists in the list of scores
+int find_user(UserScore *user_scores, int num_users, const char *username) {
+    for (int i = 0; i < num_users; i++) {
+        if (strcmp(user_scores[i].username, username) == 0) {
+            return i;  // User found
+        }
+    }
+    return -1;  // User not found
+}
+
 // Function to calculate score for a given hunt
 void calculate_score(const char *hunt_id) {
     DIR *dir = opendir(hunt_id);
@@ -29,7 +47,8 @@ void calculate_score(const char *hunt_id) {
     }
 
     struct dirent *entry;
-    int total_score = 0;
+    UserScore user_scores[MAX_USERS];
+    int num_users = 0;
 
     while ((entry = readdir(dir))) {
         // Only process .dat files (instead of .treasure)
@@ -61,7 +80,19 @@ void calculate_score(const char *hunt_id) {
                     printf("Value           : %d\n", t.value);
                     printf("----------------------------------------\n");
 
-                    total_score += t.value;  // Sum the value of the treasure
+                    // Check if the user already exists in the list
+                    int user_index = find_user(user_scores, num_users, t.username);
+                    if (user_index == -1) {
+                        // New user, add to the list
+                        if (num_users < MAX_USERS) {
+                            strcpy(user_scores[num_users].username, t.username);
+                            user_scores[num_users].score = t.value;
+                            num_users++;
+                        }
+                    } else {
+                        // User exists, add score to the existing user
+                        user_scores[user_index].score += t.value;
+                    }
                 } else {
                     printf("Error reading treasure file %s\n", filepath);
                     break;  // Exit if we can't read the full treasure data
@@ -73,10 +104,12 @@ void calculate_score(const char *hunt_id) {
     }
 
     closedir(dir);
-    
-    // Output the total score to stdout
+
+    // Output the score for each user
     printf("\n----------------------------------------\n");
-    printf("Total Score for hunt '%s' : %d\n", hunt_id, total_score);
+    for (int i = 0; i < num_users; i++) {
+        printf("Total score in '%s' for user '%s' : %d\n", hunt_id, user_scores[i].username, user_scores[i].score);
+    }
     printf("----------------------------------------\n");
 }
 
