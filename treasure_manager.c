@@ -33,11 +33,12 @@ typedef struct {
 
 // Function to log the operation in the logged_hunt file
 void log_operation(const char *hunt_id, const char *operation, const char *details) {
-    const char *log_filepath = "hunt_log.txt";  // Global log file path
+    char log_filepath[FILE_PATH_MAX];
+    snprintf(log_filepath, FILE_PATH_MAX, "%s/%s_log.txt", hunt_id, hunt_id);  // Specific log file for each hunt
 
     int logfile = open(log_filepath, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (logfile < 0) {
-        perror("Error opening log file");
+        perror("Error opening hunt-specific log file");
         return;
     }
 
@@ -47,9 +48,27 @@ void log_operation(const char *hunt_id, const char *operation, const char *detai
     strftime(timestamp, 20, "%Y-%m-%d %H:%M:%S", tm_info);
 
     // Log the operation with hunt_id
-    dprintf(logfile, "[%s] Hunt: %s | Operation: %s | Details: %s\n", timestamp, hunt_id, operation, details);
+    char log_message[512];  // Ensure the buffer is large enough to hold the formatted log entry
+    snprintf(log_message, sizeof(log_message), "[%s] Hunt: %s | Operation: %s | Details: %s\n", timestamp, hunt_id, operation, details);
+
+    ssize_t bytes_written = write(logfile, log_message, strlen(log_message));
+    if (bytes_written == -1) {
+        perror("Error writing to log file");
+    }
 
     close(logfile);
+
+    // Create a symlink in the root directory for easy access to the log file
+    char symlink_path[FILE_PATH_MAX];
+    snprintf(symlink_path, FILE_PATH_MAX, "./logged_hunt-%s", hunt_id);
+
+    // Check if the symlink already exists before creating it
+    if (access(symlink_path, F_OK) != 0) {
+        // Symlink does not exist, create it
+        if (symlink(log_filepath, symlink_path) != 0) {
+            perror("Error creating symlink for log file");
+        }
+    }
 }
 
 // Function to create the hunt directory if it does not exist
@@ -66,7 +85,7 @@ void add_treasure(const char *hunt_id) {
     printf("Enter Treasure ID: ");
     scanf("%d", &t.treasure_id);  // Changed to integer input
 
-    printf("Enter username (unique): ");
+    printf("Enter username: ");
     scanf("%s", t.username);
 
     printf("Enter latitude: ");
