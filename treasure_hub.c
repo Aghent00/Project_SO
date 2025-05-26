@@ -32,6 +32,7 @@ char current_username[128] = "";
 
 // ================= SIGNAL HANDLERS (monitor role) =================
 
+
 void sigusr1_handler(int sig) {
     printf("SIGUSR1 received\n");
     // List all hunts and number of treasures in each
@@ -172,6 +173,7 @@ void sigusr2_handler(int sig) {
     printf("> ");
 }
 
+
 // Signal handler for SIGTERM
 void sigterm_handler(int sig) {
     if (sig == SIGTERM) {
@@ -183,6 +185,7 @@ void sigterm_handler(int sig) {
 }
 
 
+
 void sigchld_handler(int sig) {
     int status;
     // Wait for the monitor process to stop without blocking other operations
@@ -190,6 +193,9 @@ void sigchld_handler(int sig) {
         printf("Monitor process has exited.\n");
     }
 }
+
+
+
 
 // ================ MONITOR CONTROL (main program) ==================
 
@@ -255,102 +261,226 @@ void list_hunts() {
         printf("Monitor not running.\n");
         return;
     }
-    kill(monitor_pid, SIGUSR1);
-    sleep(1); 
+
+    int pipe_fds[2];
+    if (pipe(pipe_fds) == -1) {
+        perror("Pipe creation failed");
+        return;
+    }
+
+    pid_t pid = fork();
+    if (pid == -1) {
+        perror("Fork failed");
+        return;
+    }
+
+    if (pid == 0) {
+        // Child process: Send output through the pipe
+        close(pipe_fds[0]);  // Close the read end
+
+        // Redirect stdout to the pipe
+        if (dup2(pipe_fds[1], STDOUT_FILENO) == -1) {
+            perror("dup2 failed");
+            exit(EXIT_FAILURE);
+        }
+
+        // Send SIGUSR1 to the monitor to list hunts
+        kill(monitor_pid, SIGUSR1);
+        sleep(1);  // Allow time for the signal to be processed
+
+        exit(0);  // Exit the child process
+    } else {
+        // Parent process: Read the output from the pipe
+        close(pipe_fds[1]);  // Close the write end
+
+        char result[MAX_PATH];
+        ssize_t bytes_read;
+        
+        // Read the full output from the pipe
+        while ((bytes_read = read(pipe_fds[0], result, sizeof(result) - 1)) > 0) {
+            result[bytes_read] = '\0';  // Null-terminate the result string
+            printf("%s", result);  // Print the result
+        }
+
+        if (bytes_read == -1) {
+            perror("Read from pipe failed");
+        }
+
+        close(pipe_fds[0]);  // Close the read end
+        wait(NULL);  // Wait for the child process to finish
+    }
 }
 
 void list_treasures(const char *hunt_id) {
-    char filepath[MAX_PATH];
-    snprintf(filepath, MAX_PATH, "%s/treasure.dat", hunt_id);
-
-    int fd = open(filepath, O_RDONLY);
-    if (fd == -1) {
-        perror("Error opening file for reading");
+    int pipe_fds[2];
+    if (pipe(pipe_fds) == -1) {
+        perror("Pipe creation failed");
         return;
     }
 
-    struct stat file_stat;
-    if (fstat(fd, &file_stat) == -1) {
-        perror("Error getting file information");
+    pid_t pid = fork();
+    if (pid == -1) {
+        perror("Fork failed");
+        return;
+    }
+
+    if (pid == 0) {
+        // Child process: Send output through the pipe
+        close(pipe_fds[0]);  // Close the read end
+
+        // Redirect stdout to the pipe
+        if (dup2(pipe_fds[1], STDOUT_FILENO) == -1) {
+            perror("dup2 failed");
+            exit(EXIT_FAILURE);
+        }
+
+        // List treasures for the specified hunt
+        char filepath[MAX_PATH];
+        snprintf(filepath, MAX_PATH, "%s/treasure.dat", hunt_id);
+
+        int fd = open(filepath, O_RDONLY);
+        if (fd == -1) {
+            perror("Error opening file for reading");
+            exit(EXIT_FAILURE);
+        }
+
+        struct stat file_stat;
+        if (fstat(fd, &file_stat) == -1) {
+            perror("Error getting file information");
+            close(fd);
+            exit(EXIT_FAILURE);
+        }
+
+        size_t file_size = file_stat.st_size;
+        Treasure *treasures = malloc(file_size);
+        if (treasures == NULL) {
+            perror("Error allocating memory for treasures");
+            close(fd);
+            exit(EXIT_FAILURE);
+        }
+
+        ssize_t bytes_read = read(fd, treasures, file_size);
+        if (bytes_read == -1) {
+            perror("Error reading file");
+            free(treasures);
+            close(fd);
+            exit(EXIT_FAILURE);
+        }
+
         close(fd);
-        return;
-    }
 
-    size_t file_size = file_stat.st_size;
-    Treasure *treasures = malloc(file_size);
-    if (treasures == NULL) {
-        perror("Error allocating memory for treasures");
-        close(fd);
-        return;
-    }
+        size_t treasure_count = bytes_read / sizeof(Treasure);
 
-    ssize_t bytes_read = read(fd, treasures, file_size);
-    if (bytes_read == -1) {
-        perror("Error reading file");
+        // Output the list of treasures to the pipe
+        for (size_t i = 0; i < treasure_count; ++i) {
+            printf("\nTreasure ID: %d\n", treasures[i].treasure_id);
+            printf("Username: %s\n", treasures[i].username);
+            printf("Latitude: %.6f\n", treasures[i].latitude);
+            printf("Longitude: %.6f\n", treasures[i].longitude);
+            printf("Clue: %s\n", treasures[i].clue);
+            printf("Value: %d\n", treasures[i].value);
+        }
+
         free(treasures);
-        close(fd);
-        return;
+        exit(0);  // Exit the child process
+    } else {
+        // Parent process: Read the output from the pipe
+        close(pipe_fds[1]);  // Close the write end
+
+        char result[MAX_PATH];
+        ssize_t bytes_read;
+        
+        // Read the full output from the pipe
+        while ((bytes_read = read(pipe_fds[0], result, sizeof(result) - 1)) > 0) {
+            result[bytes_read] = '\0';  // Null-terminate the result string
+            printf("%s", result);  // Print the result
+        }
+
+        if (bytes_read == -1) {
+            perror("Read from pipe failed");
+        }
+
+        close(pipe_fds[0]);  // Close the read end
+        wait(NULL);  // Wait for the child process to finish
     }
-
-    close(fd);
-
-    size_t treasure_count = bytes_read / sizeof(Treasure);
-
-    printf("Hunt: %s\n", hunt_id);
-    printf("\nTreasure File: treasure.dat\n");
-    printf("File: %s/treasure.dat\n", hunt_id);
-    printf("Size: %ld bytes\n", file_size);
-    printf("Last modified: %s\n", ctime(&file_stat.st_mtime));
-
-    // Display treasures
-    printf("\nTreasures in this hunt:\n");
-    for (size_t i = 0; i < treasure_count; ++i) {
-        printf("\nTreasure ID: %d\n", treasures[i].treasure_id);
-        printf("Username: %s\n", treasures[i].username);
-        printf("Latitude: %.6f\n", treasures[i].latitude);
-        printf("Longitude: %.6f\n", treasures[i].longitude);
-        printf("Clue: %s\n", treasures[i].clue);
-        printf("Value: %d\n", treasures[i].value);
-    }
-
-    printf("\nTotal size of treasures: %ld bytes\n", file_size);
-    printf("Total number of treasures: %zu\n", treasure_count);
-
-    free(treasures);
 }
 
 
 void view_treasure(const char *hunt_id, const char *treasure_id) {
-    char filepath[MAX_PATH];
-    snprintf(filepath, MAX_PATH, "%s/treasure.dat", hunt_id);
-
-    int fd = open(filepath, O_RDONLY);
-    if (fd < 0) {
-        perror("Error opening file for reading");
+    int pipe_fds[2];
+    if (pipe(pipe_fds) == -1) {
+        perror("Pipe creation failed");
         return;
     }
 
-    Treasure t;
-    ssize_t bytes_read;
-    int found = 0;
-    while ((bytes_read = read(fd, &t, sizeof(Treasure))) == sizeof(Treasure)) {
-        if (t.treasure_id == atoi(treasure_id)) {
-            found = 1;
-            printf("Treasure ID: %d\n", t.treasure_id);
-            printf("Username: %s\n", t.username);
-            printf("Latitude: %.6f\n", t.latitude);
-            printf("Longitude: %.6f\n", t.longitude);
-            printf("Clue: %s\n", t.clue);
-            printf("Value: %d\n", t.value);
-            break; // Stop searching after finding the treasure
+    pid_t pid = fork();
+    if (pid == -1) {
+        perror("Fork failed");
+        return;
+    }
+
+    if (pid == 0) {
+        // Child process: Send output through the pipe
+        close(pipe_fds[0]);  // Close the read end
+
+        // Redirect stdout to the pipe
+        if (dup2(pipe_fds[1], STDOUT_FILENO) == -1) {
+            perror("dup2 failed");
+            exit(EXIT_FAILURE);
         }
-    }
 
-    if (!found) {
-        printf("Treasure with ID '%s' not found.\n", treasure_id);
-    }
+        // Open the treasure file
+        char filepath[MAX_PATH];
+        snprintf(filepath, MAX_PATH, "%s/treasure.dat", hunt_id);
 
-    close(fd);
+        int fd = open(filepath, O_RDONLY);
+        if (fd < 0) {
+            perror("Error opening file for reading");
+            exit(EXIT_FAILURE);
+        }
+
+        Treasure t;
+        ssize_t bytes_read;
+        int found = 0;
+        while ((bytes_read = read(fd, &t, sizeof(Treasure))) == sizeof(Treasure)) {
+            if (t.treasure_id == atoi(treasure_id)) {
+                found = 1;
+                printf("Treasure ID: %d\n", t.treasure_id);
+                printf("Username: %s\n", t.username);
+                printf("Latitude: %.6f\n", t.latitude);
+                printf("Longitude: %.6f\n", t.longitude);
+                printf("Clue: %s\n", t.clue);
+                printf("Value: %d\n", t.value);
+                break;  // Stop searching after finding the treasure
+            }
+        }
+
+        if (!found) {
+            printf("Treasure with ID '%s' not found.\n", treasure_id);
+        }
+
+        close(fd);
+        exit(0);  // Exit the child process
+    } else {
+        // Parent process: Read the output from the pipe
+        close(pipe_fds[1]);  // Close the write end
+
+        char result[MAX_PATH];
+        ssize_t bytes_read;
+        
+        // Read the full output from the pipe
+        while ((bytes_read = read(pipe_fds[0], result, sizeof(result) - 1)) > 0) {
+            result[bytes_read] = '\0';  // Null-terminate the result string
+            printf("%s", result);  // Print the result
+        }
+
+        if (bytes_read == -1) {
+            perror("Read from pipe failed");
+        }
+
+        close(pipe_fds[0]);  // Close the read end
+        wait(NULL);  // Wait for the child process to finish
+    }
 }
 
 // ====================== CALCULATE SCORE =====================
@@ -411,6 +541,8 @@ void calculate_score(const char *hunt_id) {
     }
 }
 
+
+
 void exit_program() {
     if (monitor_pid != -1) {
         printf("Error: Monitor is still running. Stop it first.\n");
@@ -419,6 +551,9 @@ void exit_program() {
         exit(0);
     }
 }
+
+
+
 
 // ======================= MAIN LOOP =========================
 
@@ -466,6 +601,9 @@ int main() {
             printf("Unknown command: %s\n", command);
         }
     }
+
+    return 0;
+}   
 
     return 0;
 }
